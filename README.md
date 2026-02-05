@@ -41,7 +41,7 @@ python download_model.py --repo_id $REPO_ID --local_dir $REPO_ID
 
 ### Evaluation
 ```bash
-REPO_ID=gunho1123/Qwen3-32B-anybcq2to4-g128
+REPO_ID=gunho1123/Llama-3.1-8B-anybcq2to4-g128
 
 # MMLU
 python run_eval.py --model_path $REPO_ID
