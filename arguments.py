@@ -3,10 +3,10 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
-
 from transformers import (
     MODEL_FOR_CAUSAL_LM_MAPPING,
 )
+
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
@@ -156,13 +156,80 @@ class ModelArguments:
     quantization: Optional[bool] = field(
         default=True,
         metadata={"help":'quantization on/off'},
-    )    
+    )
+    layer_start: Optional[int] = field(
+        default=0,
+        metadata={"help": "Inclusive start layer index for chunked quantization."},
+    )
+    layer_end: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Exclusive end layer index for chunked quantization (-1 means all layers)."},
+    )
+    chunk_index: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Chunk index in [0, num_chunks). If set, overrides layer_start/layer_end."},
+    )
+    num_chunks: Optional[int] = field(
+        default=1,
+        metadata={"help": "Number of chunks to split transformer layers into for parallel PTQ jobs."},
+    )
+    skip_eval: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Skip post-quantization evaluation to speed up shard jobs."},
+    )
+    dist_ptq: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Enable distributed pipeline PTQ launcher mode."},
+    )
+    stage_rank: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Pipeline stage rank for distributed PTQ. -1 means infer from env rank."},
+    )
+    num_stages: Optional[int] = field(
+        default=1,
+        metadata={"help": "Number of pipeline stages for distributed PTQ."},
+    )
+    microbatch_size: Optional[int] = field(
+        default=1,
+        metadata={"help": "Microbatch size for distributed stage streaming."},
+    )
+    dist_backend: Optional[str] = field(
+        default="nccl",
+        metadata={"help": "torch.distributed backend for distributed PTQ."},
+    )
+    dist_init_method: Optional[str] = field(
+        default="env://",
+        metadata={"help": "torch.distributed init_method for distributed PTQ."},
+    )
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
             raise ValueError(
                 "--config_overrides can't be used in combination with --config_name or --model_name_or_path"
             )
+        if self.layer_start is not None and self.layer_start < 0:
+            raise ValueError("--layer_start must be >= 0")
+        if self.layer_end is not None and self.layer_end != -1 and self.layer_end <= 0:
+            raise ValueError("--layer_end must be -1 or > 0")
+        if self.chunk_index is not None and self.chunk_index < -1:
+            raise ValueError("--chunk_index must be >= 0 or -1")
+        if self.num_chunks is not None and self.num_chunks < 1:
+            raise ValueError("--num_chunks must be >= 1")
+        if (
+            self.chunk_index is not None
+            and self.chunk_index != -1
+            and self.num_chunks is not None
+            and self.chunk_index >= self.num_chunks
+        ):
+            raise ValueError("--chunk_index must be smaller than --num_chunks")
+        if self.num_stages is not None and self.num_stages < 1:
+            raise ValueError("--num_stages must be >= 1")
+        if self.stage_rank is not None and self.stage_rank < -1:
+            raise ValueError("--stage_rank must be >= 0 or -1")
+        if self.microbatch_size is not None and self.microbatch_size < 1:
+            raise ValueError("--microbatch_size must be >= 1")
+        if self.dist_ptq and self.num_stages == 1:
+            raise ValueError("--dist_ptq requires --num_stages > 1")
 
 
 @dataclass

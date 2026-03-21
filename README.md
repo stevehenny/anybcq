@@ -84,6 +84,109 @@ CUDA_VISIBLE_DEVICES=${GPU} python run_clm.py \
 
 Tip: We found `--input_prob 0.5` works well for LLaMA- and Gemma-family models, while `--input_prob 1.0` tends to work better for Qwen- and Phi-family models.
 
+### 4-node chunked PTQ for one merged AnyBCQ model
+
+If you want one final model (e.g. `--n_bits_w 2 --add_bits 6`) but faster wall-clock time, run layer chunks in parallel and merge:
+
+```bash
+# run this once per node with NODE_RANK in {0,1,2,3}
+MODEL_PATH=meta-llama/Llama-3.1-8B
+NUM_CHUNKS=4
+NODE_RANK=0
+
+python run_clm.py \
+  --model_name_or_path ${MODEL_PATH} \
+  --dataset_name c4 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 4 \
+  --do_eval \
+  --w_lr1 1e-4 --w_lr2 1e-4 --w_lr3 1e-4 \
+  --n_bits_w 2 \
+  --add_bits 6 \
+  --group_size 128 \
+  --num_samples 512 \
+  --iters_w 5000 \
+  --input_prob 0.5 \
+  --asymmetric False \
+  --train_beta False \
+  --num_chunks ${NUM_CHUNKS} \
+  --chunk_index ${NODE_RANK} \
+  --skip_eval True \
+  --output_dir /scratch/$USER/anybcq_chunks/chunk_${NODE_RANK} \
+  --cache_dir /scratch/$USER/hf_cache
+```
+
+Then merge shards into one checkpoint:
+
+```bash
+python merge_anybcq_chunks.py \
+  --shard_dir /scratch/$USER/anybcq_chunks/chunk_0 \
+  --shard_dir /scratch/$USER/anybcq_chunks/chunk_1 \
+  --shard_dir /scratch/$USER/anybcq_chunks/chunk_2 \
+  --shard_dir /scratch/$USER/anybcq_chunks/chunk_3 \
+  --output_dir /scratch/$USER/anybcq_chunks/merged_2to8
+```
+
+Evaluate the merged model:
+
+```bash
+python run_eval.py --model_path /scratch/$USER/anybcq_chunks/merged_2to8
+```
+
+### 4-node distributed activation-stream PTQ launcher (pipeline stage partition)
+
+Use one process per GPU and let each rank own one contiguous layer stage:
+
+```bash
+srun --ntasks=4 --ntasks-per-node=1 apptainer exec --nv ../pytorch_25.04-py3.sif bash -lc '
+set -euo pipefail
+cd /path/to/multi-precision-spec-decode/anybcq
+export MASTER_ADDR=${MASTER_ADDR:-$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)}
+export MASTER_PORT=${MASTER_PORT:-29500}
+export WORLD_SIZE=${SLURM_NTASKS}
+export RANK=${SLURM_PROCID}
+export LOCAL_RANK=${SLURM_LOCALID}
+
+python run_clm.py \
+  --model_name_or_path ${MODEL_PATH} \
+  --dataset_name c4 \
+  --do_eval \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 4 \
+  --w_lr1 1e-4 --w_lr2 1e-4 --w_lr3 1e-4 \
+  --n_bits_w 2 \
+  --add_bits 6 \
+  --group_size 128 \
+  --num_samples 512 \
+  --iters_w 5000 \
+  --input_prob 0.5 \
+  --asymmetric False \
+  --train_beta False \
+  --dist_ptq True \
+  --num_stages ${WORLD_SIZE} \
+  --stage_rank ${RANK} \
+  --microbatch_size 1 \
+  --skip_eval True \
+  --output_dir /scratch/$USER/anybcq_dist/stage_${RANK} \
+  --cache_dir /scratch/$USER/hf_cache
+'
+```
+
+Then merge stage outputs:
+
+```bash
+python merge_anybcq_chunks.py \
+  --shard_dir /scratch/$USER/anybcq_dist/stage_0 \
+  --shard_dir /scratch/$USER/anybcq_dist/stage_1 \
+  --shard_dir /scratch/$USER/anybcq_dist/stage_2 \
+  --shard_dir /scratch/$USER/anybcq_dist/stage_3 \
+  --output_dir /scratch/$USER/anybcq_dist/merged_2to8
+```
+
+Notes:
+- This mode streams hidden states and metadata (`attention_mask`, `position_ids`, `cache_position`) stage-to-stage.
+- Each stage saves only its local layer span; merge remaps local layer indices back to global indices.
+
 
 ## ✅ Evaluation
 

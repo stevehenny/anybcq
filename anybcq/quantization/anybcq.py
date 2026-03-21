@@ -69,14 +69,58 @@ class AnyBCQ:
         self.qlayer_list = ["INTLinear"]
         self.base_bit = wq_params["n_bits"]
 
-    def minimize(self, block_list_class=torch.nn.ModuleList):
-        print(self.model.device)
+    def _normalize_layer_range(self, total_layers, layer_start, layer_end):
+        start = 0 if layer_start is None else int(layer_start)
+        end = total_layers if layer_end is None or int(layer_end) == -1 else int(layer_end)
+        if start < 0 or start >= total_layers:
+            raise ValueError(
+                f"layer_start ({start}) must be in [0, {total_layers - 1}]"
+            )
+        if end <= start or end > total_layers:
+            raise ValueError(
+                f"layer_end ({end}) must be in [{start + 1}, {total_layers}]"
+            )
+        return start, end
+
+    def _propagate_quantized_cache_through_block(self, cached_data, block):
+        for precision in sorted(set([self.base_bit, self.base_bit + self.add_bits])):
+            cached_data.set_precision(precision)
+            wrapped_block = DataCacheWrapper(block)
+            cached_data.q_data_caching(wrapped_block)
+            del wrapped_block
+            torch.cuda.empty_cache()
+
+    def minimize(
+        self,
+        block_list_class=torch.nn.ModuleList,
+        layer_start=0,
+        layer_end=None,
+    ):
+        model_device = getattr(self.model, "device", None)
+        if model_device is None:
+            try:
+                model_device = next(self.model.parameters()).device
+            except StopIteration:
+                model_device = "unknown"
+        print(model_device)
         print(self.model)
         # Find decoder layers
-        for _, module in self.model.named_modules():
-            if isinstance(module, block_list_class):
-                block_units = module
-                break
+        block_units = getattr(self.model, "ptq_layers", None)
+        if block_units is None:
+            for _, module in self.model.named_modules():
+                if isinstance(module, block_list_class):
+                    block_units = module
+                    break
+        if block_units is None:
+            raise RuntimeError("Unable to find decoder layer module list for PTQ.")
+
+        total_layers = len(block_units)
+        layer_start, layer_end = self._normalize_layer_range(
+            total_layers, layer_start, layer_end
+        )
+        print(
+            f"Chunked PTQ range: layers [{layer_start}, {layer_end}) / total={total_layers}"
+        )
 
         block_units[0] = DataCacheWrapper(block_units[0])
         cached_data = CachedDataset(
@@ -90,7 +134,50 @@ class AnyBCQ:
         )
         block_units[0] = block_units[0].module
 
-        for idx in tqdm(range(len(block_units))):
+        for idx in tqdm(range(total_layers)):
+            if idx >= layer_end:
+                break
+
+            if idx < layer_start:
+                print("=" * 60)
+                print(f"    Layer {idx} Skip (outside chunk)")
+                print("=" * 60)
+
+                if idx > 0:
+                    fp_block = block_units[idx]
+                    wrapped_block = DataCacheWrapper(fp_block)
+                    cached_data.fp_data_caching(wrapped_block)
+                    del wrapped_block
+                    torch.cuda.empty_cache()
+
+                skip_block = block_units[idx].to("cuda")
+                swap_quant_model(
+                    skip_block,
+                    n_bits=self.wq_params["n_bits"],
+                    n_rounds=20,
+                    group_size=self.wq_params["group_size"],
+                    packing=False,
+                    asymmetric=self.asymmetric,
+                    swap_type="bcq",
+                )
+                for _ in range(self.add_bits):
+                    add_onebit_model(
+                        skip_block,
+                        n_rounds=20,
+                        group_size=self.wq_params["group_size"],
+                        packing=False,
+                        swap_type="bcq",
+                    )
+                self._propagate_quantized_cache_through_block(cached_data, skip_block)
+                skip_block = self.type_cast(skip_block, self.torch_dtype)
+                save_alpha_and_beta_in_bcqlinear(skip_block)
+                replace_bcq_with_lutgemm(skip_block)
+                skip_block = self.type_cast(skip_block, self.torch_dtype)
+                skip_block.to("cpu")
+                block_units[idx] = skip_block
+                torch.cuda.empty_cache()
+                continue
+
             print("=" * 60)
             print(f"    Layer {idx} Optimization Start")
             print("=" * 60)
@@ -116,6 +203,8 @@ class AnyBCQ:
                 swap_type="bcq",
             )
 
+            wrapped_block = None
+            cached_dataloader = None
             for i in range(self.add_bits + 1):
                 if i == 0:
                     cached_data.set_precision(self.wq_params["n_bits"])
@@ -172,6 +261,12 @@ class AnyBCQ:
 
         del cached_data
         torch.cuda.empty_cache()
+        return {
+            "layer_start": layer_start,
+            "layer_end": layer_end,
+            "num_layers": total_layers,
+            "num_quantized_layers": layer_end - layer_start,
+        }
 
     def type_cast(self, block, cast_type):
         if block is None:
@@ -290,8 +385,11 @@ class AnyBCQ:
                 # ───── NEW: build rotary embeddings if a position_ids tensor is present ──
 
                 # ❶ Choose the RoPE module.
-                if hasattr(self.model.model, "rotary_emb"):  # Qwen3 / Qwen2
-                    rope = self.model.model.rotary_emb
+                model_backbone = getattr(self.model, "model", None)
+                if model_backbone is not None and hasattr(
+                    model_backbone, "rotary_emb"
+                ):  # Qwen3 / Qwen2
+                    rope = model_backbone.rotary_emb
                 elif hasattr(recon_block.self_attn, "rotary_emb"):  # Llama‑style layers
                     rope = recon_block.self_attn.rotary_emb
                 else:
