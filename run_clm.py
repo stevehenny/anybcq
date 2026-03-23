@@ -257,9 +257,9 @@ def _forward_layer_stack(base_model, layers, hidden_states, other):
             kwargs["position_embeddings"] = (cos, sin)
 
         if kwargs:
-            layer_out = layer(hidden_states=out, **kwargs)
+            layer_out = layer(out, **kwargs)
         else:
-            layer_out = layer(hidden_states=out)
+            layer_out = layer(out)
         out = _tensor_payload(layer_out)
 
     return out
