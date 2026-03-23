@@ -361,116 +361,164 @@ def build_pipeline_stage_dataloader(
     left = stage_rank - 1
     right = stage_rank + 1
     local_items = []
+    model_backbone = getattr(model, "model", model)
+    embed_tokens = getattr(model_backbone, "embed_tokens", None)
+    rotary_emb = getattr(model_backbone, "rotary_emb", None)
+    capture_devices_logged = False
 
-    if is_first:
-        _debug_log(
-            dist_state,
-            debug,
-            "pipeline dataloader build start (first stage, microbatch_size=%s)",
-            microbatch_size,
-        )
-        with torch.no_grad():
-            for batch in source_dataloader:
-                batch_size = int(batch["input_ids"].shape[0])
-                for i in range(0, batch_size, microbatch_size):
-                    j = min(batch_size, i + microbatch_size)
-                    for sample_idx in range(i, j):
-                        sample = {}
-                        for key, value in batch.items():
-                            if isinstance(value, torch.Tensor):
-                                sample[key] = value[sample_idx : sample_idx + 1]
-                        sample.pop("labels", None)
-                        micro_gpu = {
-                            k: _move_to_device(v, device) for k, v in sample.items()
-                        }
-                        hidden_in, other = _capture_first_layer_context(
-                            model=model,
-                            all_layers=all_layers,
-                            micro_inputs=micro_gpu,
-                            device=device,
-                        )
-                        stage_hidden = _forward_layer_stack(
-                            base_model=model,
-                            layers=stage_layers,
-                            hidden_states=hidden_in,
-                            other=other,
-                        )
-                        if not is_last:
-                            _debug_log(
-                                dist_state,
-                                debug,
-                                "send stage packet -> rank %s hidden_shape=%s",
-                                right,
-                                tuple(stage_hidden.shape),
+    for layer in stage_layers:
+        layer.to(device)
+    if rotary_emb is not None:
+        rotary_emb.to(device)
+
+    try:
+        if is_first:
+            if embed_tokens is not None:
+                embed_tokens.to(device)
+            _debug_log(
+                dist_state,
+                debug,
+                "pipeline dataloader build start (first stage, microbatch_size=%s)",
+                microbatch_size,
+            )
+            with torch.no_grad():
+                for batch in source_dataloader:
+                    batch_size = int(batch["input_ids"].shape[0])
+                    for i in range(0, batch_size, microbatch_size):
+                        j = min(batch_size, i + microbatch_size)
+                        for sample_idx in range(i, j):
+                            sample = {}
+                            for key, value in batch.items():
+                                if isinstance(value, torch.Tensor):
+                                    sample[key] = value[sample_idx : sample_idx + 1]
+                            sample.pop("labels", None)
+                            micro_gpu = {
+                                k: _move_to_device(v, device) for k, v in sample.items()
+                            }
+                            if debug and not capture_devices_logged:
+                                embed_param = (
+                                    next(embed_tokens.parameters(), None)
+                                    if embed_tokens is not None
+                                    else None
+                                )
+                                first_layer_param = next(stage_layers[0].parameters(), None)
+                                _debug_log(
+                                    dist_state,
+                                    debug,
+                                    (
+                                        "capture devices input_ids=%s embed=%s first_layer=%s "
+                                        "stage_hidden_target=%s"
+                                    ),
+                                    micro_gpu["input_ids"].device
+                                    if "input_ids" in micro_gpu
+                                    else "n/a",
+                                    embed_param.device if embed_param is not None else "n/a",
+                                    first_layer_param.device
+                                    if first_layer_param is not None
+                                    else "n/a",
+                                    device,
+                                )
+                                capture_devices_logged = True
+                            hidden_in, other = _capture_first_layer_context(
+                                model=model,
+                                all_layers=all_layers,
+                                micro_inputs=micro_gpu,
+                                device=device,
                             )
-                            _send_stage_packet(
-                                dst=right,
-                                hidden_states=stage_hidden,
+                            stage_hidden = _forward_layer_stack(
+                                base_model=model,
+                                layers=stage_layers,
+                                hidden_states=hidden_in,
                                 other=other,
                             )
+                            if not is_last:
+                                _debug_log(
+                                    dist_state,
+                                    debug,
+                                    "send stage packet -> rank %s hidden_shape=%s",
+                                    right,
+                                    tuple(stage_hidden.shape),
+                                )
+                                _send_stage_packet(
+                                    dst=right,
+                                    hidden_states=stage_hidden,
+                                    other=other,
+                                )
 
-                        local_item = {
-                            "hidden_states": _strip_batch_dim(hidden_in).detach().cpu()
-                        }
-                        for key in ("attention_mask", "position_ids", "cache_position"):
-                            value = other.get(key, None)
-                            if isinstance(value, torch.Tensor):
-                                local_item[key] = _strip_batch_dim(value).detach().cpu()
-                        local_items.append(local_item)
+                            local_item = {
+                                "hidden_states": _strip_batch_dim(hidden_in).detach().cpu()
+                            }
+                            for key in ("attention_mask", "position_ids", "cache_position"):
+                                value = other.get(key, None)
+                                if isinstance(value, torch.Tensor):
+                                    local_item[key] = _strip_batch_dim(value).detach().cpu()
+                            local_items.append(local_item)
 
-                        del stage_hidden, hidden_in, other, micro_gpu, sample
-                        torch.cuda.empty_cache()
+                            del stage_hidden, hidden_in, other, micro_gpu, sample
+                            torch.cuda.empty_cache()
 
-        if not is_last:
-            _debug_log(dist_state, debug, "send stage done -> rank %s", right)
-            _send_stage_done(dst=right)
-    else:
-        _debug_log(
-            dist_state,
-            debug,
-            "pipeline dataloader build start (recv from rank %s, send to rank %s)",
-            left,
-            right if not is_last else -1,
-        )
-        with torch.no_grad():
-            while True:
-                _debug_log(dist_state, debug, "waiting for stage packet from rank %s", left)
-                is_done, hidden_in, other = _recv_stage_packet(src=left, device=device)
-                if is_done:
-                    if not is_last:
-                        _debug_log(dist_state, debug, "forward done signal -> rank %s", right)
-                        _send_stage_done(dst=right)
-                    break
-
-                stage_hidden = _forward_layer_stack(
-                    base_model=model,
-                    layers=stage_layers,
-                    hidden_states=hidden_in,
-                    other=other,
-                )
-                if not is_last:
+            if not is_last:
+                _debug_log(dist_state, debug, "send stage done -> rank %s", right)
+                _send_stage_done(dst=right)
+        else:
+            _debug_log(
+                dist_state,
+                debug,
+                "pipeline dataloader build start (recv from rank %s, send to rank %s)",
+                left,
+                right if not is_last else -1,
+            )
+            with torch.no_grad():
+                while True:
                     _debug_log(
-                        dist_state,
-                        debug,
-                        "relay stage packet -> rank %s hidden_shape=%s",
-                        right,
-                        tuple(stage_hidden.shape),
+                        dist_state, debug, "waiting for stage packet from rank %s", left
                     )
-                    _send_stage_packet(
-                        dst=right,
-                        hidden_states=stage_hidden,
+                    is_done, hidden_in, other = _recv_stage_packet(src=left, device=device)
+                    if is_done:
+                        if not is_last:
+                            _debug_log(
+                                dist_state, debug, "forward done signal -> rank %s", right
+                            )
+                            _send_stage_done(dst=right)
+                        break
+
+                    stage_hidden = _forward_layer_stack(
+                        base_model=model,
+                        layers=stage_layers,
+                        hidden_states=hidden_in,
                         other=other,
                     )
+                    if not is_last:
+                        _debug_log(
+                            dist_state,
+                            debug,
+                            "relay stage packet -> rank %s hidden_shape=%s",
+                            right,
+                            tuple(stage_hidden.shape),
+                        )
+                        _send_stage_packet(
+                            dst=right,
+                            hidden_states=stage_hidden,
+                            other=other,
+                        )
 
-                local_item = {"hidden_states": _strip_batch_dim(hidden_in).detach().cpu()}
-                for key in ("attention_mask", "position_ids", "cache_position"):
-                    value = other.get(key, None)
-                    if isinstance(value, torch.Tensor):
-                        local_item[key] = _strip_batch_dim(value).detach().cpu()
-                local_items.append(local_item)
+                    local_item = {"hidden_states": _strip_batch_dim(hidden_in).detach().cpu()}
+                    for key in ("attention_mask", "position_ids", "cache_position"):
+                        value = other.get(key, None)
+                        if isinstance(value, torch.Tensor):
+                            local_item[key] = _strip_batch_dim(value).detach().cpu()
+                    local_items.append(local_item)
 
-                del stage_hidden, hidden_in, other
-                torch.cuda.empty_cache()
+                    del stage_hidden, hidden_in, other
+                    torch.cuda.empty_cache()
+    finally:
+        for layer in stage_layers:
+            layer.to("cpu")
+        if is_first and embed_tokens is not None:
+            embed_tokens.to("cpu")
+        if rotary_emb is not None:
+            rotary_emb.to("cpu")
+        torch.cuda.empty_cache()
 
     stage_dataset = StageCalibrationDataset(local_items)
     stage_loader = DataLoader(
