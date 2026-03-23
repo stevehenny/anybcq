@@ -463,6 +463,7 @@ def resolve_dist_state(model_args):
     if not model_args.dist_ptq:
         return None
 
+
     stage_rank = model_args.stage_rank
     if stage_rank == -1:
         stage_rank = _env_int("RANK", "SLURM_PROCID", default=0)
@@ -482,13 +483,14 @@ def resolve_dist_state(model_args):
         torch.cuda.set_device(local_rank)
 
     if not dist.is_initialized():
+        print("Initializing process group")
         dist.init_process_group(
             backend=model_args.dist_backend,
             init_method=model_args.dist_init_method,
             rank=stage_rank,
             world_size=world_size,
         )
-
+    print("Process group initialized")
     return {
         "stage_rank": stage_rank,
         "world_size": world_size,
