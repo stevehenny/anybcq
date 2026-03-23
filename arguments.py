@@ -201,6 +201,10 @@ class ModelArguments:
         default="env://",
         metadata={"help": "torch.distributed init_method for distributed PTQ."},
     )
+    dist_debug: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Enable verbose rank-aware distributed debug logging."},
+    )
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):

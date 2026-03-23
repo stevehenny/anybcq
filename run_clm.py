@@ -80,6 +80,18 @@ require_version(
 logger = logging.getLogger(__name__)
 
 
+def _rank_prefix(dist_state):
+    if dist_state is None:
+        return "[rank=local]"
+    return f"[rank={dist_state['stage_rank']}/{dist_state['world_size']},local={dist_state['local_rank']}]"
+
+
+def _debug_log(dist_state, enabled, message, *args):
+    if not enabled:
+        return
+    logger.info("%s " + message, _rank_prefix(dist_state), *args)
+
+
 class DeviceAwareTrainer(Trainer):
     def _prepare_inputs(self, inputs):
         inputs = super()._prepare_inputs(inputs)
@@ -314,6 +326,8 @@ def build_pipeline_stage_dataloader(
     world_size,
     microbatch_size,
     per_device_train_batch_size,
+    dist_state=None,
+    debug=False,
 ):
     device = torch.device("cuda", torch.cuda.current_device())
     is_first = stage_rank == 0
@@ -323,6 +337,12 @@ def build_pipeline_stage_dataloader(
     local_items = []
 
     if is_first:
+        _debug_log(
+            dist_state,
+            debug,
+            "pipeline dataloader build start (first stage, microbatch_size=%s)",
+            microbatch_size,
+        )
         with torch.no_grad():
             for batch in source_dataloader:
                 batch_size = int(batch["input_ids"].shape[0])
@@ -350,6 +370,13 @@ def build_pipeline_stage_dataloader(
                             other=other,
                         )
                         if not is_last:
+                            _debug_log(
+                                dist_state,
+                                debug,
+                                "send stage packet -> rank %s hidden_shape=%s",
+                                right,
+                                tuple(stage_hidden.shape),
+                            )
                             _send_stage_packet(
                                 dst=right,
                                 hidden_states=stage_hidden,
@@ -369,13 +396,23 @@ def build_pipeline_stage_dataloader(
                         torch.cuda.empty_cache()
 
         if not is_last:
+            _debug_log(dist_state, debug, "send stage done -> rank %s", right)
             _send_stage_done(dst=right)
     else:
+        _debug_log(
+            dist_state,
+            debug,
+            "pipeline dataloader build start (recv from rank %s, send to rank %s)",
+            left,
+            right if not is_last else -1,
+        )
         with torch.no_grad():
             while True:
+                _debug_log(dist_state, debug, "waiting for stage packet from rank %s", left)
                 is_done, hidden_in, other = _recv_stage_packet(src=left, device=device)
                 if is_done:
                     if not is_last:
+                        _debug_log(dist_state, debug, "forward done signal -> rank %s", right)
                         _send_stage_done(dst=right)
                     break
 
@@ -386,6 +423,13 @@ def build_pipeline_stage_dataloader(
                     other=other,
                 )
                 if not is_last:
+                    _debug_log(
+                        dist_state,
+                        debug,
+                        "relay stage packet -> rank %s hidden_shape=%s",
+                        right,
+                        tuple(stage_hidden.shape),
+                    )
                     _send_stage_packet(
                         dst=right,
                         hidden_states=stage_hidden,
@@ -408,6 +452,12 @@ def build_pipeline_stage_dataloader(
         shuffle=False,
         collate_fn=default_data_collator,
         batch_size=per_device_train_batch_size,
+    )
+    _debug_log(
+        dist_state,
+        debug,
+        "pipeline dataloader build complete local_items=%s",
+        len(local_items),
     )
     return stage_loader, len(local_items)
 
@@ -483,14 +533,18 @@ def resolve_dist_state(model_args):
         torch.cuda.set_device(local_rank)
 
     if not dist.is_initialized():
-        print("Initializing process group")
+        print(
+            f"[dist-init] rank={stage_rank} local_rank={local_rank} world_size={world_size} "
+            f"backend={model_args.dist_backend} init_method={model_args.dist_init_method}",
+            flush=True,
+        )
         dist.init_process_group(
             backend=model_args.dist_backend,
             init_method=model_args.dist_init_method,
             rank=stage_rank,
             world_size=world_size,
         )
-    print("Process group initialized")
+    print(f"[dist-init] rank={stage_rank} process group initialized", flush=True)
     return {
         "stage_rank": stage_rank,
         "world_size": world_size,
@@ -502,7 +556,6 @@ def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
-
     parser = HfArgumentParser(
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
@@ -514,6 +567,15 @@ def main():
         )
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    if model_args.dist_debug:
+        os.environ["TORCH_DISTRIBUTED_DEBUG"] = os.environ.get(
+            "TORCH_DISTRIBUTED_DEBUG", "DETAIL"
+        )
+        os.environ["NCCL_DEBUG"] = os.environ.get("NCCL_DEBUG", "INFO")
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = os.environ.get(
+            "NCCL_ASYNC_ERROR_HANDLING", "1"
+        )
 
     dist_state = resolve_dist_state(model_args)
     # local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -542,6 +604,11 @@ def main():
         + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
     logger.info(f"Training/evaluation parameters {training_args}")
+    _debug_log(
+        dist_state,
+        model_args.dist_debug,
+        "startup args parsed, beginning dataset/model init",
+    )
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -580,6 +647,12 @@ def main():
     from data_utils import get_dataset
 
     raw_datasets = get_dataset(data_args, model_args)
+    _debug_log(
+        dist_state,
+        model_args.dist_debug,
+        "dataset loaded keys=%s",
+        list(raw_datasets.keys()),
+    )
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -692,6 +765,11 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc="Running tokenizer on dataset",
         )
+    _debug_log(
+        dist_state,
+        model_args.dist_debug,
+        "tokenization complete",
+    )
 
     if data_args.block_size is None:
         block_size = tokenizer.model_max_length
@@ -741,6 +819,11 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc=f"Grouping texts in chunks of {block_size}",
         )
+    _debug_log(
+        dist_state,
+        model_args.dist_debug,
+        "group_texts complete",
+    )
 
     if training_args.do_train:
         if "train" not in tokenized_datasets:
@@ -781,6 +864,11 @@ def main():
             dist_state["stage_rank"],
             dist_state["world_size"],
             dist_state["local_rank"],
+        )
+        _debug_log(
+            dist_state,
+            model_args.dist_debug,
+            "distributed context ready",
         )
 
     # Quantization: FlexRound for GPT Causal LM tasks
@@ -855,6 +943,13 @@ def main():
                 dist_state["world_size"],
                 dist_state["local_rank"],
             )
+            _debug_log(
+                dist_state,
+                model_args.dist_debug,
+                "stage layer assignment [%s, %s)",
+                layer_start,
+                layer_end,
+            )
 
         model_for_ptq = model
         stage_item_count = None
@@ -869,10 +964,18 @@ def main():
                 world_size=world_size,
                 microbatch_size=model_args.microbatch_size,
                 per_device_train_batch_size=training_args.per_device_train_batch_size,
+                dist_state=dist_state,
+                debug=model_args.dist_debug,
             )
             logger.info(
                 "Stage %s built pipeline local dataset with %s items",
                 stage_rank,
+                stage_item_count,
+            )
+            _debug_log(
+                dist_state,
+                model_args.dist_debug,
+                "stage dataloader ready items=%s",
                 stage_item_count,
             )
             quantization_source_dataloader = stage_loader
@@ -913,6 +1016,13 @@ def main():
         quantization_chunk_metadata = anybcq.minimize(
             layer_start=local_layer_start,
             layer_end=local_layer_end,
+        )
+        _debug_log(
+            dist_state,
+            model_args.dist_debug,
+            "anybcq.minimize complete local layer range [%s,%s)",
+            local_layer_start,
+            local_layer_end,
         )
         if model_args.dist_ptq:
             quantization_chunk_metadata["local_layer_start"] = local_layer_start
@@ -970,11 +1080,22 @@ def main():
                 anybcq_configs["chunk"] = quantization_chunk_metadata
             config.anybcq = anybcq_configs
             config.save_pretrained(training_args.output_dir)
+            _debug_log(
+                dist_state,
+                model_args.dist_debug,
+                "checkpoint saved to %s",
+                training_args.output_dir,
+            )
 
     # Evaluation
     if model_args.skip_eval:
         logger.info("Skipping evaluation because --skip_eval is enabled.")
         if dist_state is not None and dist.is_initialized():
+            _debug_log(
+                dist_state,
+                model_args.dist_debug,
+                "entering final barrier before process group destroy",
+            )
             dist.barrier()
             dist.destroy_process_group()
         return
@@ -1086,6 +1207,11 @@ def main():
             metrics_wikitext_data = json.dumps(metrics_wikitext_qnn_eval)
 
     if dist_state is not None and dist.is_initialized():
+        _debug_log(
+            dist_state,
+            model_args.dist_debug,
+            "evaluation complete, entering final barrier",
+        )
         dist.barrier()
         dist.destroy_process_group()
 
