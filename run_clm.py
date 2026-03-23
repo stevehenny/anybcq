@@ -236,24 +236,46 @@ def _forward_layer_stack(base_model, layers, hidden_states, other):
     position_ids = other.get("position_ids", None)
     cache_position = other.get("cache_position", None)
 
-    model_backbone = getattr(base_model, "model", None)
+    model_backbone = getattr(base_model, "model", base_model)
     for layer in layers:
         kwargs = {}
         if attention_mask is not None:
             kwargs["attention_mask"] = attention_mask
-        if position_ids is not None:
-            kwargs["position_ids"] = position_ids
+
+        position_ids_for_layer = position_ids
+        if position_ids_for_layer is None and cache_position is not None:
+            if cache_position.dim() == 1:
+                position_ids_for_layer = cache_position.unsqueeze(0)
+            else:
+                position_ids_for_layer = cache_position
+        if position_ids_for_layer is None:
+            position_ids_for_layer = torch.arange(
+                out.shape[1], device=out.device, dtype=torch.long
+            ).unsqueeze(0)
+        else:
+            position_ids_for_layer = position_ids_for_layer.to(
+                device=out.device, dtype=torch.long
+            )
+            if position_ids_for_layer.dim() == 1:
+                position_ids_for_layer = position_ids_for_layer.unsqueeze(0)
+        if position_ids_for_layer.shape[0] == 1 and out.shape[0] > 1:
+            position_ids_for_layer = position_ids_for_layer.expand(out.shape[0], -1)
+
+        kwargs["position_ids"] = position_ids_for_layer
         if cache_position is not None:
-            kwargs["cache_position"] = cache_position
+            kwargs["cache_position"] = cache_position.to(device=out.device)
 
+        raw_layer = getattr(layer, "module", layer)
         rope = None
-        if model_backbone is not None and hasattr(model_backbone, "rotary_emb"):
+        if hasattr(model_backbone, "rotary_emb"):
             rope = model_backbone.rotary_emb
-        elif hasattr(layer, "self_attn") and hasattr(layer.self_attn, "rotary_emb"):
-            rope = layer.self_attn.rotary_emb
+        elif hasattr(raw_layer, "self_attn") and hasattr(
+            raw_layer.self_attn, "rotary_emb"
+        ):
+            rope = raw_layer.self_attn.rotary_emb
 
-        if rope is not None and position_ids is not None:
-            cos, sin = rope(out, position_ids)
+        if rope is not None:
+            cos, sin = rope(out, position_ids_for_layer)
             kwargs["position_embeddings"] = (cos, sin)
 
         if kwargs:
