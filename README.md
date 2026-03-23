@@ -138,14 +138,24 @@ python run_eval.py --model_path /scratch/$USER/anybcq_chunks/merged_2to8
 Use one process per GPU and let each rank own one contiguous layer stage:
 
 ```bash
-srun --ntasks=4 --ntasks-per-node=1 apptainer exec --nv ../pytorch_25.04-py3.sif bash -lc '
+MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
+srun --ntasks=4 --ntasks-per-node=1 --export=ALL,MASTER_ADDR=$MASTER_ADDR apptainer exec --nv ../pytorch_25.04-py3.sif bash -lc '
 set -euo pipefail
 cd /path/to/multi-precision-spec-decode/anybcq
-export MASTER_ADDR=${MASTER_ADDR:-$(echo $SLURMD_NODENAME)}
 export MASTER_PORT=${MASTER_PORT:-29500}
 export WORLD_SIZE=${SLURM_NTASKS}
 export RANK=${SLURM_PROCID}
 export LOCAL_RANK=${SLURM_LOCALID}
+export CACHE_ROOT=$WORK/hf_cache
+mkdir -p $CACHE_ROOT/{datasets,hub,transformers} $WORK/anybcq_dist $WORK/anybcq_dist_logs
+export HF_HOME=$CACHE_ROOT
+export HF_DATASETS_CACHE=$CACHE_ROOT/datasets
+export HUGGINGFACE_HUB_CACHE=$CACHE_ROOT/hub
+export TRANSFORMERS_CACHE=$CACHE_ROOT/transformers
+export NCCL_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_ASYNC_ERROR_HANDLING=1
+export PYTHONUNBUFFERED=1
 
 python run_clm.py \
   --model_name_or_path ${MODEL_PATH} \
@@ -167,8 +177,9 @@ python run_clm.py \
   --stage_rank ${RANK} \
   --microbatch_size 1 \
   --skip_eval True \
-  --output_dir /scratch/$USER/anybcq_dist/stage_${RANK} \
-  --cache_dir /scratch/$USER/hf_cache
+  --output_dir $WORK/anybcq_dist/stage_${RANK} \
+  --cache_dir $WORK/hf_cache \
+  --dist_debug True 2>&1 | tee $WORK/anybcq_dist_logs/stage_${RANK}.log
 '
 ```
 
@@ -176,11 +187,11 @@ Then merge stage outputs:
 
 ```bash
 python merge_anybcq_chunks.py \
-  --shard_dir /scratch/$USER/anybcq_dist/stage_0 \
-  --shard_dir /scratch/$USER/anybcq_dist/stage_1 \
-  --shard_dir /scratch/$USER/anybcq_dist/stage_2 \
-  --shard_dir /scratch/$USER/anybcq_dist/stage_3 \
-  --output_dir /scratch/$USER/anybcq_dist/merged_2to8
+  --shard_dir $WORK/anybcq_dist/stage_0 \
+  --shard_dir $WORK/anybcq_dist/stage_1 \
+  --shard_dir $WORK/anybcq_dist/stage_2 \
+  --shard_dir $WORK/anybcq_dist/stage_3 \
+  --output_dir $WORK/anybcq_dist/merged_2to8
 ```
 
 Notes:

@@ -92,6 +92,32 @@ def _debug_log(dist_state, enabled, message, *args):
     logger.info("%s " + message, _rank_prefix(dist_state), *args)
 
 
+def _run_rank0_first(dist_state, enabled, label, fn):
+    if dist_state is None or not dist.is_initialized():
+        return fn()
+
+    rank = dist_state["stage_rank"]
+    if rank == 0:
+        _debug_log(dist_state, enabled, "rank0 begin: %s", label)
+        result = fn()
+        _debug_log(dist_state, enabled, "rank0 complete: %s (releasing peers)", label)
+        dist.barrier()
+        return result
+
+    _debug_log(dist_state, enabled, "waiting for rank0: %s", label)
+    dist.barrier()
+    _debug_log(dist_state, enabled, "rank0 finished, running local: %s", label)
+    return fn()
+
+
+def _sync_all_ranks(dist_state, enabled, label):
+    if dist_state is None or not dist.is_initialized():
+        return
+    _debug_log(dist_state, enabled, "barrier start: %s", label)
+    dist.barrier()
+    _debug_log(dist_state, enabled, "barrier done: %s", label)
+
+
 class DeviceAwareTrainer(Trainer):
     def _prepare_inputs(self, inputs):
         inputs = super()._prepare_inputs(inputs)
@@ -646,7 +672,12 @@ def main():
 
     from data_utils import get_dataset
 
-    raw_datasets = get_dataset(data_args, model_args)
+    raw_datasets = _run_rank0_first(
+        dist_state,
+        model_args.dist_debug,
+        "dataset download/prepare",
+        lambda: get_dataset(data_args, model_args),
+    )
     _debug_log(
         dist_state,
         model_args.dist_debug,
@@ -765,6 +796,7 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc="Running tokenizer on dataset",
         )
+    _sync_all_ranks(dist_state, model_args.dist_debug, "post-tokenization")
     _debug_log(
         dist_state,
         model_args.dist_debug,
@@ -819,6 +851,7 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc=f"Grouping texts in chunks of {block_size}",
         )
+    _sync_all_ranks(dist_state, model_args.dist_debug, "post-group-texts")
     _debug_log(
         dist_state,
         model_args.dist_debug,
