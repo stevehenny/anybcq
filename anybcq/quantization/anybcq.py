@@ -366,6 +366,7 @@ class AnyBCQ:
                     self.attention_mask = self.attention_mask.squeeze(0)
                 if self.position_ids is not None:
                     self.position_ids = self.position_ids.squeeze(0)
+                if cache_position is not None:
                     cache_position = cache_position.squeeze(0)
 
                 # Optional input mixing
@@ -378,39 +379,60 @@ class AnyBCQ:
 
                 # Cast for fp32 MSE
                 input_q = self.type_cast(input_q, self.recon_dtype)
-                self.attention_mask = self.type_cast(
-                    self.attention_mask, self.recon_dtype
-                )
+                if self.attention_mask is not None:
+                    self.attention_mask = self.type_cast(
+                        self.attention_mask, self.recon_dtype
+                    )
+                    self.attention_mask = self.attention_mask.to(device=input_q.device)
 
-                # ───── NEW: build rotary embeddings if a position_ids tensor is present ──
+                position_ids = self.position_ids
+                if position_ids is None and cache_position is not None:
+                    position_ids = cache_position
+                if position_ids is None:
+                    position_ids = torch.arange(
+                        input_q.shape[1], device=input_q.device, dtype=torch.long
+                    )
+                if position_ids.dim() == 1:
+                    position_ids = position_ids.unsqueeze(0)
+                position_ids = position_ids.to(device=input_q.device, dtype=torch.long)
+                if position_ids.shape[0] == 1 and input_q.shape[0] > 1:
+                    position_ids = position_ids.expand(input_q.shape[0], -1)
 
-                # ❶ Choose the RoPE module.
+                if cache_position is not None:
+                    cache_position = cache_position.to(
+                        device=input_q.device, dtype=torch.long
+                    )
+
                 model_backbone = getattr(self.model, "model", None)
-                if model_backbone is not None and hasattr(
-                    model_backbone, "rotary_emb"
-                ):  # Qwen3 / Qwen2
-                    rope = model_backbone.rotary_emb
-                elif hasattr(recon_block.self_attn, "rotary_emb"):  # Llama‑style layers
-                    rope = recon_block.self_attn.rotary_emb
-                else:
-                    raise RuntimeError("No rotary_emb found; add a special‑case here.")
+                if model_backbone is None:
+                    model_backbone = getattr(self.model, "_rope_owner", None)
+                if model_backbone is None:
+                    model_backbone = self.model
+                rope = getattr(model_backbone, "rotary_emb", None)
+
+                raw_recon_block = getattr(recon_block, "module", recon_block)
+                if rope is None:
+                    self_attn = getattr(raw_recon_block, "self_attn", None)
+                    rope = getattr(self_attn, "rotary_emb", None)
 
                 position_embeddings = None
-                if self.position_ids is not None:
-                    # `rotary_emb` lives inside the *attention* sub‑module
-                    cos, sin = rope(
-                        input_q, self.position_ids
-                    )  # same call Qwen3Model uses
+                if rope is not None:
+                    cos, sin = rope(input_q, position_ids)
                     position_embeddings = (cos, sin)
 
                 # ───── Forward pass through the isolated block ──────────────────────────
                 if self.attention_mask is not None:  # language task
+                    forward_kwargs = {
+                        "hidden_states": input_q,
+                        "attention_mask": self.attention_mask,
+                        "position_ids": position_ids,
+                    }
+                    if position_embeddings is not None:
+                        forward_kwargs["position_embeddings"] = position_embeddings
+                    if cache_position is not None:
+                        forward_kwargs["cache_position"] = cache_position
                     output_q = recon_block(
-                        hidden_states=input_q,
-                        attention_mask=self.attention_mask,
-                        position_ids=self.position_ids,
-                        position_embeddings=position_embeddings,  # ← NEW
-                        cache_position=cache_position,
+                        **forward_kwargs,
                     )
                 else:  # e.g. vision transformer
                     output_q = recon_block(input_q)
