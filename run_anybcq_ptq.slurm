@@ -27,6 +27,7 @@ echo "MASTER_ADDR=$MASTER_ADDR"
 echo "MASTER_PORT=$MASTER_PORT"
 
 # ===== Run =====
+cd $WORK
 srun --ntasks=$SLURM_NTASKS \
      --ntasks-per-node=1 \
      --export=ALL \
