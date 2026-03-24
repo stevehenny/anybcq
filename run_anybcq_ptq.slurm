@@ -10,9 +10,10 @@
 
 set -euo pipefail
 
-
+set +u
 module purge
 module load tacc-apptainer
+set -u
 
 
 export MODEL_PATH=$WORK/Llama-3.1-8B
