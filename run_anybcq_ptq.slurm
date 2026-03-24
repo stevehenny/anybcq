@@ -3,7 +3,7 @@
 #SBATCH -J anybcq_ptq
 #SBATCH -N 4 
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
+#SBATCH --gpus-per-node=gpu:1
 #SBATCH -t 03:00:00
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err 
