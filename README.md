@@ -139,9 +139,9 @@ Use one process per GPU and let each rank own one contiguous layer stage:
 
 ```bash
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
-srun --ntasks=4 --ntasks-per-node=1 --export=ALL,MASTER_ADDR=$MASTER_ADDR apptainer exec --nv ../pytorch_25.04-py3.sif bash -lc '
+srun --ntasks=4 --ntasks-per-node=1 --export=ALL,MASTER_ADDR=$MASTER_ADDR apptainer exec --nv ./pytorch_25.04-py3.sif bash -lc '
 set -euo pipefail
-cd /path/to/multi-precision-spec-decode/anybcq
+cd $WORK/multi-precision-spec-decode/anybcq
 export MASTER_PORT=${MASTER_PORT:-29500}
 export WORLD_SIZE=${SLURM_NTASKS}
 export RANK=${SLURM_PROCID}
