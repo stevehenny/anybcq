@@ -37,30 +37,34 @@ if args.offline:
 # ---------------- DATASET HELPERS ----------------
 
 
+from datasets import Dataset
+
+
 def get_wikitext2():
-    """Load WikiText2 from local Arrow cache via load_from_disk"""
-    cache_dir = os.environ["HF_DATASETS_CACHE"]
-    # Point to the directory containing the dataset arrow files
+    import pyarrow as pa
+    import pyarrow.feather as feather
+    import pyarrow.dataset as ds
+
     dataset_dir = os.path.join(
-        cache_dir,
+        os.environ["HF_DATASETS_CACHE"],
         "Salesforce___wikitext",
         "wikitext-2-raw-v1",
         "0.0.0",
         "b08601e04326c79dfdd32d625aee71d232d685c3",
     )
 
-    if not os.path.exists(dataset_dir):
-        raise FileNotFoundError(f"WikiText2 dataset folder not found at {dataset_dir}")
+    test_file = os.path.join(dataset_dir, "wikitext-test.arrow")
+    train_file = os.path.join(dataset_dir, "wikitext-train.arrow")
+    val_file = os.path.join(dataset_dir, "wikitext-validation.arrow")
 
-    ds = load_from_disk(dataset_dir)
-    return ds["test"]["text"]  # Note: split='test' is already stored in the dataset
+    # Load the test split as a HuggingFace Dataset
+    ds_test = Dataset.from_file(test_file)
+    return ds_test["text"]  # This is exactly what your script wants
 
 
 def get_c4():
-    """Load a subset of C4 from local Arrow cache via load_from_disk"""
-    cache_dir = os.environ["HF_DATASETS_CACHE"]
     dataset_dir = os.path.join(
-        cache_dir,
+        os.environ["HF_DATASETS_CACHE"],
         "allenai___c4",
         "en",
         "default-b04fc8a0b8562884",
@@ -68,11 +72,9 @@ def get_c4():
         "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
     )
 
-    if not os.path.exists(dataset_dir):
-        raise FileNotFoundError(f"C4 dataset folder not found at {dataset_dir}")
-
-    ds = load_from_disk(dataset_dir)
-    return ds["validation"]["text"][:10000]  # Limit to first 10k
+    val_file = os.path.join(dataset_dir, "c4-train-00000-of-00002.arrow")
+    ds_val = Dataset.from_file(val_file)
+    return ds_val["text"][:10000]
 
 
 # Patch dataloader dynamically
