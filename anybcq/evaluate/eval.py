@@ -359,8 +359,14 @@ def _load_input_tokens(tokenizer_type, testcase_name, tokenizer, verbose):
 
         logprint(verbose, "Tokenizing test set...")
 
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({"pad_token": tokenizer.eos_token})
+            logprint(verbose, "Added pad token to tokenizer.")
         input_tokens = tokenizer(
-            raw_text, return_tensors="pt", padding=True, truncation=True
+            raw_text,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
         )
         # save input_tokens to cache
         if tokenizer_type:
