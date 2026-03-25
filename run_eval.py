@@ -37,41 +37,41 @@ if args.offline:
 
 
 def get_wikitext2():
-    """Load WikiText2 directly from local cache files on cluster."""
-    cache_dir = (
-        Path(os.environ["HF_DATASETS_CACHE"])
-        / "Salesforce___wikitext"
-        / "wikitext-2-raw-v1"
-    )
-    test_file = cache_dir / "test.txt"
+    """Load WikiText2 from local cache safely."""
+    cache_dir = os.environ["HF_DATASETS_CACHE"]
+    dataset_path = os.path.join(cache_dir, "Salesforce___wikitext", "wikitext-2-raw-v1")
 
-    if not test_file.exists():
-        raise FileNotFoundError(f"WikiText2 test file not found at {test_file}")
-
-    # Read the lines directly
-    with test_file.open("r", encoding="utf-8") as f:
-        lines = [line.rstrip("\n") for line in f if line.strip()]
-
-    return lines
+    try:
+        ds = load_dataset(
+            dataset_path,
+            "wikitext-2-raw-v1",
+            split="test",
+            local_files_only=True,
+        )
+        return ds["text"]
+    except Exception as e:
+        print(f"[ERROR] Failed to load WikiText2 locally: {e}")
+        raise
 
 
 def get_c4():
-    """Load a subset of C4 directly from local cache."""
-    cache_dir = Path(os.environ["HF_DATASETS_CACHE"]) / "allenai___c4" / "en"
-    val_file = cache_dir / "validation.jsonl"
+    """Load a subset of C4 from local cache safely."""
+    cache_dir = os.environ["HF_DATASETS_CACHE"]
+    dataset_path = os.path.join(cache_dir, "allenai___c4", "en")
 
-    if not val_file.exists():
-        raise FileNotFoundError(f"C4 validation file not found at {val_file}")
-
-    lines = []
-    with val_file.open("r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if i >= 10000:
-                break
-            data = json.loads(line)
-            lines.append(data.get("text", ""))
-
-    return lines
+    try:
+        ds = load_dataset(
+            dataset_path,
+            "en",
+            split="validation",
+            streaming=False,  # Arrow files allow non-streaming
+            local_files_only=True,
+        )
+        # Limit to first 10k examples
+        return ds["text"][:10000]
+    except Exception as e:
+        print(f"[ERROR] Failed to load C4 locally: {e}")
+        raise
 
 
 # Patch dataloader dynamically
