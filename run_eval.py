@@ -2,9 +2,10 @@ import os
 import json
 import argparse
 
-# ---- IMPORTANT: make datasets robust on clusters ----
+# ---------------- ENVIRONMENT SETUP ----------------
+# Use cluster-safe dataset cache
 os.environ.setdefault(
-    "HF_DATASETS_CACHE", os.path.expanduser("~/.cache/huggingface/datasets")
+    "HF_DATASETS_CACHE", os.path.expandvars("$WORK/../.cache/datasets")
 )
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
@@ -34,32 +35,30 @@ if args.offline:
 
 # ---------------- DATASET HELPERS ----------------
 def get_wikitext2():
-    """Robust WikiText2 loader"""
-    try:
+    """Load WikiText2 robustly from local cluster cache or fallback to online."""
+    local_ds_path = os.path.expandvars(
+        "$HF_DATASETS_CACHE/Salesforce___wikitext/wikitext-2-raw-v1"
+    )
+    if os.path.exists(local_ds_path):
+        print(f"[INFO] Loading WikiText2 from local cache at {local_ds_path}")
+        return load_dataset(local_ds_path, split="test")["text"]
+    else:
+        print("[WARN] Local cache not found, falling back to online download")
         return load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")[
             "text"
         ]
-    except Exception:
-        print("[WARN] Falling back to local-only WikiText2")
-        return load_dataset(
-            "Salesforce/wikitext",
-            "wikitext-2-raw-v1",
-            split="test",
-            local_files_only=True,
-        )["text"]
 
 
 def get_c4():
-    """Streaming C4 (avoids huge download)"""
-    try:
+    """Load C4 robustly: streaming or from local cluster cache."""
+    local_ds_path = os.path.expandvars("$HF_DATASETS_CACHE/allenai___c4")
+    if os.path.exists(local_ds_path):
+        print(f"[INFO] Loading C4 from local cache at {local_ds_path}")
+        return load_dataset(local_ds_path, split="validation")["text"][:10000]
+    else:
+        print("[WARN] C4 local cache not found, streaming small sample")
         dataset = load_dataset("allenai/c4", "en", split="validation", streaming=True)
         return [x["text"] for _, x in zip(range(10000), dataset)]
-    except Exception:
-        print("[WARN] C4 streaming failed, trying local cache")
-        dataset = load_dataset(
-            "allenai/c4", "en", split="validation", local_files_only=True
-        )
-        return dataset["text"][:10000]
 
 
 # Patch dataloader dynamically
@@ -67,7 +66,6 @@ import anybcq.evaluate.helpers.dataloader as dataloader
 
 dataloader.get_wikitext2 = get_wikitext2
 dataloader.get_c4_new = get_c4
-
 
 # ---------------- TASK SETUP ----------------
 datasets = ["wikitext2", "c4_new"]
@@ -99,7 +97,7 @@ print("==================================================")
 
 tokenizer_type, tokenizer, model = eval.auto_model_load(args.model_path, args.fp16)
 
-# ---- PPL ----
+# ---- PERPLEXITY EVAL ----
 ppl_results = {}
 print("\n[INFO] Running perplexity eval...")
 ppl_results = eval.evaluate_ppl(
