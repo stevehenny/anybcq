@@ -35,30 +35,29 @@ if args.offline:
 
 # ---------------- DATASET HELPERS ----------------
 def get_wikitext2():
-    """Load WikiText2 robustly from local cluster cache or fallback to online."""
-    local_ds_path = os.path.expandvars(
-        "$HF_DATASETS_CACHE/Salesforce___wikitext/wikitext-2-raw-v1"
-    )
-    if os.path.exists(local_ds_path):
-        print(f"[INFO] Loading WikiText2 from local cache at {local_ds_path}")
-        return load_dataset(local_ds_path, split="test")["text"]
-    else:
-        print("[WARN] Local cache not found, falling back to online download")
-        return load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")[
-            "text"
-        ]
+    """Load WikiText2 robustly from local cluster cache only."""
+    try:
+        return load_dataset(
+            "Salesforce/wikitext",
+            "wikitext-2-raw-v1",
+            split="test",
+            local_files_only=True,
+        )["text"]
+    except Exception as e:
+        print(f"[ERROR] Failed to load WikiText2 locally: {e}")
+        raise
 
 
 def get_c4():
-    """Load C4 robustly: streaming or from local cluster cache."""
-    local_ds_path = os.path.expandvars("$HF_DATASETS_CACHE/allenai___c4")
-    if os.path.exists(local_ds_path):
-        print(f"[INFO] Loading C4 from local cache at {local_ds_path}")
-        return load_dataset(local_ds_path, split="validation")["text"][:10000]
-    else:
-        print("[WARN] C4 local cache not found, streaming small sample")
-        dataset = load_dataset("allenai/c4", "en", split="validation", streaming=True)
-        return [x["text"] for _, x in zip(range(10000), dataset)]
+    """Load C4 robustly from local cluster cache only."""
+    try:
+        dataset = load_dataset(
+            "allenai/c4", "en", split="validation", local_files_only=True
+        )
+        return dataset["text"][:10000]
+    except Exception as e:
+        print(f"[ERROR] Failed to load C4 locally: {e}")
+        raise
 
 
 # Patch dataloader dynamically
