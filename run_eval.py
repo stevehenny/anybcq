@@ -10,7 +10,8 @@ os.environ.setdefault(
 )
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-from datasets import load_dataset
+from datasets import load_from_disk
+import os
 from anybcq.evaluate.helpers import utils
 from anybcq.evaluate import eval
 
@@ -37,41 +38,41 @@ if args.offline:
 
 
 def get_wikitext2():
-    """Load WikiText2 from local cache safely."""
+    """Load WikiText2 from local Arrow cache via load_from_disk"""
     cache_dir = os.environ["HF_DATASETS_CACHE"]
-    dataset_path = os.path.join(cache_dir, "Salesforce___wikitext", "wikitext-2-raw-v1")
+    # Point to the directory containing the dataset arrow files
+    dataset_dir = os.path.join(
+        cache_dir,
+        "Salesforce___wikitext",
+        "wikitext-2-raw-v1",
+        "0.0.0",
+        "b08601e04326c79dfdd32d625aee71d232d685c3",
+    )
 
-    try:
-        ds = load_dataset(
-            dataset_path,
-            "wikitext-2-raw-v1",
-            split="test",
-            local_files_only=True,
-        )
-        return ds["text"]
-    except Exception as e:
-        print(f"[ERROR] Failed to load WikiText2 locally: {e}")
-        raise
+    if not os.path.exists(dataset_dir):
+        raise FileNotFoundError(f"WikiText2 dataset folder not found at {dataset_dir}")
+
+    ds = load_from_disk(dataset_dir)
+    return ds["test"]["text"]  # Note: split='test' is already stored in the dataset
 
 
 def get_c4():
-    """Load a subset of C4 from local cache safely."""
+    """Load a subset of C4 from local Arrow cache via load_from_disk"""
     cache_dir = os.environ["HF_DATASETS_CACHE"]
-    dataset_path = os.path.join(cache_dir, "allenai___c4", "en")
+    dataset_dir = os.path.join(
+        cache_dir,
+        "allenai___c4",
+        "en",
+        "default-b04fc8a0b8562884",
+        "0.0.0",
+        "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
+    )
 
-    try:
-        ds = load_dataset(
-            dataset_path,
-            "en",
-            split="validation",
-            streaming=False,  # Arrow files allow non-streaming
-            local_files_only=True,
-        )
-        # Limit to first 10k examples
-        return ds["text"][:10000]
-    except Exception as e:
-        print(f"[ERROR] Failed to load C4 locally: {e}")
-        raise
+    if not os.path.exists(dataset_dir):
+        raise FileNotFoundError(f"C4 dataset folder not found at {dataset_dir}")
+
+    ds = load_from_disk(dataset_dir)
+    return ds["validation"]["text"][:10000]  # Limit to first 10k
 
 
 # Patch dataloader dynamically
