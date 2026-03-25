@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+from pathlib import Path
 
 # ---------------- ENVIRONMENT SETUP ----------------
 # Use cluster-safe dataset cache
@@ -32,32 +33,45 @@ args = parser.parse_args()
 if args.offline:
     os.environ["HF_DATASETS_OFFLINE"] = "1"
 
-
 # ---------------- DATASET HELPERS ----------------
+
+
 def get_wikitext2():
-    """Load WikiText2 robustly from local cluster cache only."""
-    try:
-        return load_dataset(
-            "Salesforce/wikitext",
-            "wikitext-2-raw-v1",
-            split="test",
-            local_files_only=True,
-        )["text"]
-    except Exception as e:
-        print(f"[ERROR] Failed to load WikiText2 locally: {e}")
-        raise
+    """Load WikiText2 directly from local cache files on cluster."""
+    cache_dir = (
+        Path(os.environ["HF_DATASETS_CACHE"])
+        / "Salesforce___wikitext"
+        / "wikitext-2-raw-v1"
+    )
+    test_file = cache_dir / "test.txt"
+
+    if not test_file.exists():
+        raise FileNotFoundError(f"WikiText2 test file not found at {test_file}")
+
+    # Read the lines directly
+    with test_file.open("r", encoding="utf-8") as f:
+        lines = [line.rstrip("\n") for line in f if line.strip()]
+
+    return lines
 
 
 def get_c4():
-    """Load C4 robustly from local cluster cache only."""
-    try:
-        dataset = load_dataset(
-            "allenai/c4", "en", split="validation", local_files_only=True
-        )
-        return dataset["text"][:10000]
-    except Exception as e:
-        print(f"[ERROR] Failed to load C4 locally: {e}")
-        raise
+    """Load a subset of C4 directly from local cache."""
+    cache_dir = Path(os.environ["HF_DATASETS_CACHE"]) / "allenai___c4" / "en"
+    val_file = cache_dir / "validation.jsonl"
+
+    if not val_file.exists():
+        raise FileNotFoundError(f"C4 validation file not found at {val_file}")
+
+    lines = []
+    with val_file.open("r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i >= 10000:
+                break
+            data = json.loads(line)
+            lines.append(data.get("text", ""))
+
+    return lines
 
 
 # Patch dataloader dynamically
