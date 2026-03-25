@@ -353,7 +353,10 @@ def _load_input_tokens(tokenizer_type, testcase_name, tokenizer, verbose):
             verbose, f"Loading cached input tokens from {input_tokens_cache_path}..."
         )
         with torch.serialization.safe_globals(
-            [transformers.tokenization_utils_base.BatchEncoding]
+            [
+                transformers.tokenizers.Encoding,
+                transformers.tokenization_utils_base.BatchEncoding,
+            ]
         ):
             input_tokens = torch.load(input_tokens_cache_path)
     else:
