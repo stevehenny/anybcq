@@ -13,6 +13,7 @@ from anybcq.inference.AnyBCQForCausalLM import AnyBCQForCausalLM
 import os
 import json
 import lm_eval
+import tokenizers
 import transformers
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
@@ -354,7 +355,7 @@ def _load_input_tokens(tokenizer_type, testcase_name, tokenizer, verbose):
         )
         with torch.serialization.safe_globals(
             [
-                transformers.tokenizers.Encoding,
+                tokenizers.Encoding,
                 transformers.tokenization_utils_base.BatchEncoding,
             ]
         ):
