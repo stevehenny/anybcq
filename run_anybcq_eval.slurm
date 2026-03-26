@@ -1,10 +1,10 @@
 #!/bin/bash
 
-#SBATCH -J anybcq_ptq
-#SBATCH -N 4
+#SBATCH -J anybcq_eval
+#SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=gpu:1
-#SBATCH -t 03:00:00
+#SBATCH -t 08:00:00
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
 
@@ -33,4 +33,4 @@ export HF_DATASETS_CACHE=$WORK/../.cache/datasets
 # run eval 
 python run_eval.py --model_path $MODEL_PATH
 
-''
+'
