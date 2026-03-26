@@ -66,7 +66,6 @@ def get_c4():
     dataset_dir = os.path.join(
         os.environ["HF_DATASETS_CACHE"],
         "allenai___c4",
-        "en",
         "default-b04fc8a0b8562884",
         "0.0.0",
         "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
@@ -121,7 +120,7 @@ ppl_results = eval.evaluate_ppl(
     tokenizer,
     datasets,
     verbose=True,
-    chunk_size=2048,
+    chunk_size=4,
     tokenizer_type=tokenizer_type,
 )
 

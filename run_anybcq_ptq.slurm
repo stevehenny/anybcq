@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #SBATCH -J anybcq_ptq
-#SBATCH -N 4 
+#SBATCH -N 8 
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=gpu:1
-#SBATCH -t 03:00:00
+#SBATCH -p gh
+#SBATCH -t 10:00:00
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err 
 
@@ -16,7 +16,7 @@ module load tacc-apptainer
 set -u
 
 
-export MODEL_PATH=$WORK/Llama-3.1-8B
+export MODEL_PATH=$WORK/Llama-3.1-70B
 
 
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
