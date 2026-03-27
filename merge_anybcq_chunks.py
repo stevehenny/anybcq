@@ -195,6 +195,12 @@ def validate_and_collect_shards(shard_dirs, require_full_coverage: bool):
                 raise ValueError(
                     f"Invalid local chunk range [{local_start}, {local_end}) in distributed shard {shard_dir}."
                 )
+            if (local_end - local_start) != (end - start):
+                raise ValueError(
+                    "Distributed shard local/global spans differ in size for "
+                    f"{shard_dir}: local=[{local_start}, {local_end}), "
+                    f"global=[{start}, {end})."
+                )
         shard_records.append(
             {
                 "dir": shard_dir,
@@ -203,7 +209,12 @@ def validate_and_collect_shards(shard_dirs, require_full_coverage: bool):
                 "chunk_index": int(chunk.get("chunk_index", -1)),
                 "num_chunks": int(chunk.get("num_chunks", 1)),
                 "local_layer_start": int(chunk.get("local_layer_start", 0)),
-                "local_layer_end": int(chunk.get("local_layer_end", end - start)),
+                "local_layer_end": int(
+                    chunk.get(
+                        "local_layer_end",
+                        int(chunk.get("local_layer_start", 0)) + (end - start),
+                    )
+                ),
                 "dist_ptq": bool(chunk.get("dist_ptq", False)),
             }
         )
@@ -232,11 +243,134 @@ def validate_and_collect_shards(shard_dirs, require_full_coverage: bool):
     return shard_records, base_cfg, base_anybcq, num_layers
 
 
-def build_layer_prefixes(arch_config, layer_start: int, layer_end: int):
+def build_layer_prefix(arch_config):
     model_name = arch_config["model_name"]
     layers_name = arch_config["layers_name"]
-    base = f"{model_name}.{layers_name}."
-    return tuple(f"{base}{idx}." for idx in range(layer_start, layer_end))
+    return f"{model_name}.{layers_name}."
+
+
+def parse_layer_key(key: str, layer_base_prefix: str):
+    if not key.startswith(layer_base_prefix):
+        return None, None
+    suffix = key[len(layer_base_prefix) :]
+    layer_idx_str, dot, tail = suffix.partition(".")
+    if dot == "" or not layer_idx_str.isdigit():
+        return None, None
+    return int(layer_idx_str), tail
+
+
+def build_layer_key(layer_base_prefix: str, layer_idx: int, tail: str):
+    return f"{layer_base_prefix}{layer_idx}.{tail}"
+
+
+def collect_layer_indices(state_dict, layer_base_prefix: str):
+    indices = set()
+    for key in state_dict.keys():
+        layer_idx, _ = parse_layer_key(key, layer_base_prefix)
+        if layer_idx is not None:
+            indices.add(layer_idx)
+    return indices
+
+
+def infer_dist_shard_layout(rec, layer_indices):
+    """
+    Infer distributed shard key layout.
+
+    Returns:
+      - "global": shard keys use global layer indices.
+      - "local": shard keys use local layer indices and require remapping.
+    """
+    start = rec["layer_start"]
+    end = rec["layer_end"]
+    local_start = rec["local_layer_start"]
+    local_end = rec["local_layer_end"]
+
+    has_global_indices = any(start <= idx < end for idx in layer_indices)
+    has_local_indices = any(local_start <= idx < local_end for idx in layer_indices)
+    all_indices_local = all(local_start <= idx < local_end for idx in layer_indices)
+
+    # Stage-0 can be ambiguous when local/global spans are both [0, N),
+    # but either mapping is equivalent in that case.
+    same_span = (start == local_start) and (end == local_end)
+
+    if all_indices_local and has_local_indices and (not has_global_indices or same_span):
+        return "local"
+    if has_global_indices:
+        return "global"
+    if has_local_indices:
+        return "local"
+    raise ValueError(
+        "Unable to infer shard layout: no tensors matched either "
+        f"global=[{start}, {end}) or local=[{local_start}, {local_end}) ranges."
+    )
+
+
+def merge_one_shard_layer_tensors(
+    merged_state_dict,
+    shard_state_dict,
+    rec,
+    layer_base_prefix: str,
+):
+    start = rec["layer_start"]
+    end = rec["layer_end"]
+    expected_layers = set(range(start, end))
+
+    shard_layer_indices = collect_layer_indices(shard_state_dict, layer_base_prefix)
+    if not shard_layer_indices:
+        raise ValueError(
+            f"Shard {rec['dir']} has no tensors under expected layer prefix "
+            f"'{layer_base_prefix}'."
+        )
+
+    if rec.get("dist_ptq", False):
+        layout = infer_dist_shard_layout(rec, shard_layer_indices)
+    else:
+        layout = "global"
+
+    local_start = rec["local_layer_start"]
+    local_end = rec["local_layer_end"]
+    replaced = 0
+    replaced_layers = set()
+
+    for key, value in shard_state_dict.items():
+        layer_idx, tail = parse_layer_key(key, layer_base_prefix)
+        if layer_idx is None:
+            continue
+
+        if layout == "global":
+            if not (start <= layer_idx < end):
+                continue
+            mapped_layer_idx = layer_idx
+        else:
+            if not (local_start <= layer_idx < local_end):
+                continue
+            mapped_layer_idx = start + (layer_idx - local_start)
+            if not (start <= mapped_layer_idx < end):
+                raise ValueError(
+                    "Mapped local layer out of target range for shard "
+                    f"{rec['dir']}: local_idx={layer_idx} -> global_idx={mapped_layer_idx}, "
+                    f"expected in [{start}, {end})."
+                )
+
+        new_key = build_layer_key(layer_base_prefix, mapped_layer_idx, tail)
+        merged_state_dict[new_key] = value
+        replaced += 1
+        replaced_layers.add(mapped_layer_idx)
+
+    missing_layers = sorted(expected_layers - replaced_layers)
+    if replaced == 0:
+        raise ValueError(
+            f"Merged 0 tensors from shard {rec['dir']} for target layer range [{start}, {end}). "
+            f"Detected layout='{layout}'."
+        )
+    if missing_layers:
+        raise ValueError(
+            f"Shard {rec['dir']} did not provide tensors for all expected layers in "
+            f"[{start}, {end}); missing: {missing_layers[:8]}"
+            + (" ..." if len(missing_layers) > 8 else "")
+        )
+
+    return replaced, layout
 
 
 def merge_chunks(
@@ -245,37 +379,31 @@ def merge_chunks(
     arch_config,
 ):
     merged_state_dict = load_checkpoint_state_dict(base_dir)
+    layer_base_prefix = build_layer_prefix(arch_config)
+
+    base_layer_indices = collect_layer_indices(merged_state_dict, layer_base_prefix)
+    if not base_layer_indices:
+        raise ValueError(
+            f"Base shard {base_dir} has no tensors under expected layer prefix "
+            f"'{layer_base_prefix}'. Ensure shards were saved from the full model."
+        )
 
     for rec in shard_records:
         shard_dir = rec["dir"]
         if shard_dir == base_dir:
             continue
 
-        if rec.get("dist_ptq", False):
-            local_prefixes = build_layer_prefixes(
-                arch_config, rec["local_layer_start"], rec["local_layer_end"]
-            )
-            global_prefixes = build_layer_prefixes(
-                arch_config, rec["layer_start"], rec["layer_end"]
-            )
-            prefix_pairs = list(zip(local_prefixes, global_prefixes))
-        else:
-            prefixes = build_layer_prefixes(
-                arch_config, rec["layer_start"], rec["layer_end"]
-            )
-            prefix_pairs = [(prefix, prefix) for prefix in prefixes]
         shard_state_dict = load_checkpoint_state_dict(shard_dir)
 
-        replaced = 0
-        for key, value in shard_state_dict.items():
-            for src_prefix, dst_prefix in prefix_pairs:
-                if key.startswith(src_prefix):
-                    new_key = dst_prefix + key[len(src_prefix) :]
-                    merged_state_dict[new_key] = value
-                    replaced += 1
-                    break
+        replaced, layout = merge_one_shard_layer_tensors(
+            merged_state_dict=merged_state_dict,
+            shard_state_dict=shard_state_dict,
+            rec=rec,
+            layer_base_prefix=layer_base_prefix,
+        )
         print(
-            f"Merged {replaced} tensors from {shard_dir} for layers [{rec['layer_start']}, {rec['layer_end']})."
+            f"Merged {replaced} tensors from {shard_dir} for layers "
+            f"[{rec['layer_start']}, {rec['layer_end']}) using layout='{layout}'."
         )
 
         del shard_state_dict
