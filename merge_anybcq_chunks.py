@@ -272,6 +272,20 @@ def collect_layer_indices(state_dict, layer_base_prefix: str):
     return indices
 
 
+def drop_layer_range_tensors(state_dict, layer_base_prefix: str, start: int, end: int):
+    keys_to_delete = []
+    for key in state_dict.keys():
+        layer_idx, _ = parse_layer_key(key, layer_base_prefix)
+        if layer_idx is None:
+            continue
+        if start <= layer_idx < end:
+            keys_to_delete.append(key)
+
+    for key in keys_to_delete:
+        del state_dict[key]
+    return len(keys_to_delete)
+
+
 def infer_dist_shard_layout(rec, layer_indices):
     """
     Infer distributed shard key layout.
@@ -331,6 +345,7 @@ def merge_one_shard_layer_tensors(
     local_end = rec["local_layer_end"]
     replaced = 0
     replaced_layers = set()
+    remapped_tensors = {}
 
     for key, value in shard_state_dict.items():
         layer_idx, tail = parse_layer_key(key, layer_base_prefix)
@@ -353,7 +368,7 @@ def merge_one_shard_layer_tensors(
                 )
 
         new_key = build_layer_key(layer_base_prefix, mapped_layer_idx, tail)
-        merged_state_dict[new_key] = value
+        remapped_tensors[new_key] = value
         replaced += 1
         replaced_layers.add(mapped_layer_idx)
 
@@ -370,7 +385,15 @@ def merge_one_shard_layer_tensors(
             + (" ..." if len(missing_layers) > 8 else "")
         )
 
-    return replaced, layout
+    deleted = drop_layer_range_tensors(
+        merged_state_dict,
+        layer_base_prefix=layer_base_prefix,
+        start=start,
+        end=end,
+    )
+    merged_state_dict.update(remapped_tensors)
+
+    return replaced, layout, deleted
 
 
 def merge_chunks(
@@ -395,7 +418,7 @@ def merge_chunks(
 
         shard_state_dict = load_checkpoint_state_dict(shard_dir)
 
-        replaced, layout = merge_one_shard_layer_tensors(
+        replaced, layout, deleted = merge_one_shard_layer_tensors(
             merged_state_dict=merged_state_dict,
             shard_state_dict=shard_state_dict,
             rec=rec,
@@ -403,7 +426,8 @@ def merge_chunks(
         )
         print(
             f"Merged {replaced} tensors from {shard_dir} for layers "
-            f"[{rec['layer_start']}, {rec['layer_end']}) using layout='{layout}'."
+            f"[{rec['layer_start']}, {rec['layer_end']}) using layout='{layout}' "
+            f"(deleted {deleted} stale tensors first)."
         )
 
         del shard_state_dict
