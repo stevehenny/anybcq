@@ -593,6 +593,35 @@ def resolve_stage_layer_range(stage_rank, num_stages, num_layers):
     return start, end
 
 
+def _layer_base_prefix_from_arch_config(arch_config):
+    return f"{arch_config['model_name']}.{arch_config['layers_name']}."
+
+
+def _extract_local_layer_state_dict(model, arch_config, layer_start, layer_end):
+    """
+    Build a shard state dict that keeps all non-layer tensors and only local layer tensors.
+    """
+    layer_base_prefix = _layer_base_prefix_from_arch_config(arch_config)
+    full_state_dict = model.state_dict()
+    shard_state_dict = {}
+    pruned = 0
+
+    for key, value in full_state_dict.items():
+        if key.startswith(layer_base_prefix):
+            suffix = key[len(layer_base_prefix) :]
+            layer_idx_str, dot, _ = suffix.partition(".")
+            if dot and layer_idx_str.isdigit():
+                layer_idx = int(layer_idx_str)
+                if layer_start <= layer_idx < layer_end:
+                    shard_state_dict[key] = value
+                else:
+                    pruned += 1
+                continue
+        shard_state_dict[key] = value
+
+    return shard_state_dict, pruned
+
+
 def _env_int(*keys, default):
     for key in keys:
         value = os.environ.get(key)
@@ -1166,11 +1195,28 @@ def main():
 
         # save model
         if training_args.output_dir is not None and model_args.save_model:
+            model_to_save = model
             if model_args.dist_ptq:
-                model_to_save = model
+                stage_state_dict, pruned_tensors = _extract_local_layer_state_dict(
+                    model=model_to_save,
+                    arch_config=arch_config,
+                    layer_start=layer_start,
+                    layer_end=layer_end,
+                )
+                _debug_log(
+                    dist_state,
+                    model_args.dist_debug,
+                    "saving local shard state_dict for global layer range [%s,%s), pruned %s non-local layer tensors",
+                    layer_start,
+                    layer_end,
+                    pruned_tensors,
+                )
+                model_to_save.save_pretrained(
+                    training_args.output_dir,
+                    state_dict=stage_state_dict,
+                )
             else:
-                model_to_save = model
-            model_to_save.save_pretrained(training_args.output_dir)
+                model_to_save.save_pretrained(training_args.output_dir)
             tokenizer.save_pretrained(training_args.output_dir)
             # add new config parameters
             anybcq_configs = {
