@@ -197,6 +197,7 @@ python merge_anybcq_chunks.py \
 Notes:
 - This mode streams hidden states and metadata (`attention_mask`, `position_ids`, `cache_position`) stage-to-stage.
 - Each stage saves only its local layer span; merge remaps local layer indices back to global indices.
+- Local-span save is enabled in `run_clm.py` distributed PTQ mode to reduce per-rank checkpoint size and avoid quota errors from full-model saves on every rank.
 
 
 ## ✅ Evaluation
