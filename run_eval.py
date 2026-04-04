@@ -107,7 +107,7 @@ dataloader.get_wikitext2 = get_wikitext2
 dataloader.get_c4_new = get_c4
 
 # ---------------- TASK SETUP ----------------
-datasets = ["wikitext2", "c4_new"]
+datasets = ["wikitext2"]
 
 if args.downstream:
     tasks = ["winogrande", "piqa", "arc_easy", "arc_challenge", "hellaswag"]
