@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import torch
 import torch.distributed as dist
+from datasets import Dataset
 
 # ---------------- ENVIRONMENT SETUP ----------------
 # Use cluster-safe dataset cache
@@ -12,8 +13,6 @@ os.environ.setdefault(
 )
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-from datasets import load_from_disk
-import os
 from anybcq.evaluate.helpers import utils
 from anybcq.evaluate import eval
 
@@ -61,14 +60,20 @@ def is_rank0():
 # ---------------- DATASET HELPERS ----------------
 
 
-from datasets import Dataset
+def _to_contiguous_text(raw_records, *, separator: str):
+    if isinstance(raw_records, str):
+        return raw_records
+    if isinstance(raw_records, (list, tuple)):
+        text_rows = [row for row in raw_records if isinstance(row, str)]
+        if not text_rows:
+            raise ValueError("Dataset text rows are empty; cannot build evaluation stream.")
+        return separator.join(text_rows)
+    raise TypeError(
+        f"Unsupported dataset text payload type: {type(raw_records)}. Expected str/list/tuple."
+    )
 
 
 def get_wikitext2():
-    import pyarrow as pa
-    import pyarrow.feather as feather
-    import pyarrow.dataset as ds
-
     dataset_dir = os.path.join(
         os.environ["HF_DATASETS_CACHE"],
         "Salesforce___wikitext",
@@ -78,12 +83,8 @@ def get_wikitext2():
     )
 
     test_file = os.path.join(dataset_dir, "wikitext-test.arrow")
-    train_file = os.path.join(dataset_dir, "wikitext-train.arrow")
-    val_file = os.path.join(dataset_dir, "wikitext-validation.arrow")
-
-    # Load the test split as a HuggingFace Dataset
     ds_test = Dataset.from_file(test_file)
-    return ds_test["text"]  # This is exactly what your script wants
+    return _to_contiguous_text(ds_test["text"], separator="\n\n")
 
 
 def get_c4():
@@ -97,7 +98,8 @@ def get_c4():
 
     val_file = os.path.join(dataset_dir, "c4-train-00000-of-00002.arrow")
     ds_val = Dataset.from_file(val_file)
-    return ds_val["text"][:10000]
+    # Keep behavior aligned with anybcq.evaluate.helpers.dataloader.get_c4_new.
+    return " ".join(ds_val["text"][:1100])[:2088528]
 
 
 # Patch dataloader dynamically

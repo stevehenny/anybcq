@@ -790,6 +790,34 @@ def run_lm_eval(tokenizer, model, tasks, num_fewshot, verbose=True):
 def _load_input_tokens(tokenizer_type, testcase_name, tokenizer, verbose):
     """Load input tokens from cache if available, otherwise load from dataloader and save to cache."""
     input_tokens_cache_path = f"{current_dir}/input_tokens_cache/dataloader-{tokenizer_type}-{testcase_name}-test.pt"
+    cache_valid = False
+
+    def _normalize_eval_text(raw_text):
+        if isinstance(raw_text, str):
+            return raw_text
+        if isinstance(raw_text, (list, tuple)):
+            text_rows = [row for row in raw_text if isinstance(row, str)]
+            if not text_rows:
+                raise ValueError(
+                    f"Dataset '{testcase_name}' returned no text rows for perplexity evaluation."
+                )
+            separator = "\n\n" if "wikitext" in testcase_name else " "
+            return separator.join(text_rows)
+        raise TypeError(
+            f"Unsupported text payload type {type(raw_text)} for dataset '{testcase_name}'."
+        )
+
+    def _cache_has_valid_shape(batch_encoding):
+        input_ids = getattr(batch_encoding, "input_ids", None)
+        if not isinstance(input_ids, torch.Tensor):
+            return False
+        # PPL evaluation expects one continuous stream: shape [1, seq_len].
+        if input_ids.dim() != 2:
+            return False
+        if input_ids.size(0) != 1:
+            return False
+        return True
+
     if tokenizer_type and os.path.exists(input_tokens_cache_path):
         logprint(
             verbose, f"Loading cached input tokens from {input_tokens_cache_path}..."
@@ -801,10 +829,23 @@ def _load_input_tokens(tokenizer_type, testcase_name, tokenizer, verbose):
             ]
         ):
             input_tokens = torch.load(input_tokens_cache_path)
+        cache_valid = _cache_has_valid_shape(input_tokens)
+        if not cache_valid:
+            logprint(
+                verbose,
+                (
+                    f"Cached tokens at {input_tokens_cache_path} have unexpected shape; "
+                    "rebuilding cache from raw text."
+                ),
+            )
     else:
+        input_tokens = None
+
+    if input_tokens is None or not cache_valid:
         logprint(verbose, "Loading test set...")
 
         raw_text = dataloader.get_loaders(testcase_name)
+        normalized_text = _normalize_eval_text(raw_text)
 
         logprint(verbose, "Tokenizing test set...")
 
@@ -812,10 +853,10 @@ def _load_input_tokens(tokenizer_type, testcase_name, tokenizer, verbose):
             tokenizer.add_special_tokens({"pad_token": tokenizer.eos_token})
             logprint(verbose, "Added pad token to tokenizer.")
         input_tokens = tokenizer(
-            raw_text,
+            normalized_text,
             return_tensors="pt",
-            padding=True,
-            truncation=True,
+            padding=False,
+            truncation=False,
         )
         # save input_tokens to cache
         if tokenizer_type:
