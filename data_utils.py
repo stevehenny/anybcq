@@ -3,9 +3,10 @@
 
 from datasets import load_dataset
 
+
 def get_dataset(data_args, model_args):
     if data_args.dataset_name is not None:
-        if 'c4' not in data_args.dataset_name:
+        if "c4" not in data_args.dataset_name:
             # Downloading and loading a dataset from the hub.
             raw_datasets = load_dataset(
                 data_args.dataset_name,
@@ -31,22 +32,24 @@ def get_dataset(data_args, model_args):
 
         else:
             raw_datasets = load_dataset(
-                'allenai/c4',
-                data_files={'train': 'en/c4-train.00000-of-01024.json.gz'},
+                "allenai/c4",
+                data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
                 cache_dir=model_args.cache_dir,
                 # # use_auth_token=True if model_args.use_auth_token else None,
             )
             if "validation" not in raw_datasets.keys():
                 raw_datasets["validation"] = load_dataset(
-                    'allenai/c4',
-                    data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'},
+                    "allenai/c4",
+                    data_files={
+                        "validation": "en/c4-validation.00000-of-00008.json.gz"
+                    },
                     split=f"validation[:1%]",
                     cache_dir=model_args.cache_dir,
                     # # use_auth_token=True if model_args.use_auth_token else None,
                 )
                 raw_datasets["train"] = load_dataset(
-                    'allenai/c4',
-                    data_files={'train': 'en/c4-train.00000-of-01024.json.gz'},
+                    "allenai/c4",
+                    data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
                     split=f"train[:1%]",
                     cache_dir=model_args.cache_dir,
                     # # use_auth_token=True if model_args.use_auth_token else None,
@@ -93,4 +96,3 @@ def get_dataset(data_args, model_args):
             )
 
     return raw_datasets
-
